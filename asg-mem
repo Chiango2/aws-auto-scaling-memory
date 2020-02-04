@@ -1,0 +1,53 @@
+AWS Auto Scaling based on Memory Utilization in CloudFormation
+Lorenz Vanthillo
+Lorenz Vanthillo
+Follow
+Jun 10, 2019 · 4 min read
+Amazon EC2 Auto Scaling helps you ensure that you have the correct number of Amazon EC2 instances available to handle the load for your application. Amazon provides some default CloudWatch Metrics like CPUUtilization or DiskWriteOps but to scale based on Memory Utilization we are forced to create a custom metric.
+We will monitor the average RAM (memory) utilization inside our Auto Scaling group and use that metric to make scaling decisions. You can find the full CloudFormation template on my GitHub. It is validated with cfn-lint.
+Let’s begin very high level. We need an Auto Scaling Group.
+
+Nothing advanced here. We just have a minimum of 1 instance and a maximum of 5. A bit more advanced is the configuration of our Launch Configuration. The Launch Configuration serves as instance configuration template for instances which are part of our Auto Scaling group.
+
+The Launch Configuration references the imageId (depending on region), instanceType, KeyName (for SSH access. This key must be created before stack creation), IamInstanceProfile and a security group (see below).
+It will also execute a UserData script during instance launch. This script will install the CloudWatch agent, trigger the configSet ‘Default’ and pass the cfn-init return status to cfn-signal.
+Before we check the default ConfigSet in detail we will check the InstanceProfile, Role and Security Group which were referenced in the Launch Configuration.
+
+The Role allows EC2 instances to use the managed policy CloudWatchAgentAdminPolicy which allows the instance to use the CloudWatch Agent and put metrics to CloudWatch. The Security Group allows SSH access from everywhere.
+Now let’s discuss the ConfigSets.
+
+Remember the ‘Default’ ConfigSet is executed in the UserData script. It first executes the 01_SetUpCfn-hup. This instruction will create configuration files and set up commands to update the stack when there is a change in the stack metadata. 02_config-amazon-cloudwatch-agent will configure our Agent.
+The configuration file will collect the mem_used_percent metric and will attach dimensions to the metric. We configure an aggregated_dimension to aggregate the mem_used_percent metric from all instances in our Auto Scaling group. Later our CloudWatach alarm will use this.
+At last we have 03_restart-amazon-cloudwatch-agent which restarts the CloudWatchAgent. 02 and 03 must be executed when we update the stack. The instructions are together in the ‘UpdateEnvironment’ configSet and is triggered during a stack update.
+The scaling policies and CloudWatch alarms enable dynamic scaling.
+
+A CloudWatch alarm and ScaleUp policy will be triggered when the memory utilization is higher than 70 (max. 5 instances). The ScaleDown policy will take action when the memory is lower than 30 (min. 1 instance).
+Finally we can see the stack in action. Let’s create the stack using the CLI.
+Don’t forget to update the parameters to your specific needs (SSH Key).
+$ aws cloudformation create-stack --stack-name auto-scaling-memory --template-body file://template.yml --capabilities CAPABILITY_NAMED_IAM
+When the stack is created we can check our mem_used_percent metric in CloudWatch Metrics.
+
+Check our CloudWatch alarms. One of the alarms is in ‘Alarm’ state because our mem_used_percent is below 30%. Yet we still have a running EC2 instance because our Auto Scaling group minimum size is 1.
+
+Now we have created an Auto Scaling group with one running EC2 instance. We will SSH to this instance using our SSH key and increase its memory utilization by using stress.
+$ ssh -i "demo-key.pem" ec2-user@ec2-34-241-8-104.eu-west-1.compute.amazonaws.com
+Install stress on the instance.
+$ sudo amazon-linux-extras install epel -y 
+$ sudo yum install stress -y
+Increase memory utilization of the instance.
+$ stress --vm 1 --vm-bytes 810M
+stress: info: [3722] dispatching hogs: 0 cpu, 0 io, 1 vm, 0 hdd
+In a new session you can monitor the memory utilization. It will vary but the average memory utilization will increase.
+$ watch free -m
+Every 2.0s: free -m                                                                                                                                                                                                   Mon Jun 10 17:30:14 2019
+total        used        free  shared  buff/cache   available
+Mem:            983         825         111           0          46          57
+Swap:             0           0           0
+After a while the average memory consumption of our Auto Scaling group (one instance) will be over 70% for more than one minute.
+This will trigger an alarm which triggers the ScaleUp policy.
+
+The creation of a new EC2 instance is triggered.
+
+Now stop increasing memory on the instance (or when you wait too long the instance will crash because of an OutOfMemory error). Then the ScaleDown policy will be triggered by an alarm.
+Conclusion
+In this tutorial I showed how you can deploy an Auto Scaling group which scales based on memory utilization which is a custom metric.
